@@ -46,11 +46,11 @@ import com.alibaba.fastjson.parser.ParserConfig;
 import com.alibaba.fastjson.util.TypeUtils;
 
 /**
- * @author wenshao<szujobs@hotmail.com>
+ * @author wenshao[szujobs@hotmail.com]
  */
-public class JSONObject extends JSON implements Map<String, Object>, JSONAware, Cloneable, Serializable, InvocationHandler {
+@SuppressWarnings("serial")
+public class JSONObject extends JSON implements Map<String, Object>, Cloneable, Serializable, InvocationHandler {
 
-    private static final long         serialVersionUID         = 1L;
     private static final int          DEFAULT_INITIAL_CAPACITY = 16;
 
     private final Map<String, Object> map;
@@ -167,7 +167,7 @@ public class JSONObject extends JSON implements Map<String, Object>, JSONAware, 
             return 0;
         }
 
-        return castToByte(value).byteValue();
+        return castToByte(value).byteValue(); // TODO 如果 value 是""、"null"或"NULL"，可能会存在报空指针的情况，是否需要加以处理？ 其他转换也存在类似情况
     }
 
     public Short getShort(String key) {
@@ -293,17 +293,37 @@ public class JSONObject extends JSON implements Map<String, Object>, JSONAware, 
     public Object put(String key, Object value) {
         return map.put(key, value);
     }
+    
+    public JSONObject fluentPut(String key, Object value) {
+        map.put(key, value);
+        return this;
+    }
 
     public void putAll(Map<? extends String, ? extends Object> m) {
         map.putAll(m);
+    }
+
+    public JSONObject fluentPutAll(Map<? extends String, ? extends Object> m) {
+        map.putAll(m);
+        return this;
     }
 
     public void clear() {
         map.clear();
     }
 
+    public JSONObject fluentClear() {
+        map.clear();
+        return this;
+    }
+
     public Object remove(Object key) {
         return map.remove(key);
+    }
+
+    public JSONObject fluentRemove(Object key) {
+        map.remove(key);
+        return this;
     }
 
     public Set<String> keySet() {
@@ -320,7 +340,10 @@ public class JSONObject extends JSON implements Map<String, Object>, JSONAware, 
 
     @Override
     public Object clone() {
-        return new JSONObject(new HashMap<String, Object>(map));
+        return new JSONObject(map instanceof LinkedHashMap //
+                              ? new LinkedHashMap<String, Object>(map) //
+                                  : new HashMap<String, Object>(map)
+                                  );
     }
 
     public boolean equals(Object obj) {
@@ -334,6 +357,10 @@ public class JSONObject extends JSON implements Map<String, Object>, JSONAware, 
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         Class<?>[] parameterTypes = method.getParameterTypes();
         if (parameterTypes.length == 1) {
+            if (method.getName().equals("equals")) {
+                return this.equals(args[0]);
+            }
+            
             Class<?> returnType = method.getReturnType();
             if (returnType != void.class) {
                 throw new JSONException("illegal setter");
@@ -349,6 +376,7 @@ public class JSONObject extends JSON implements Map<String, Object>, JSONAware, 
 
             if (name == null) {
                 name = method.getName();
+                
                 if (!name.startsWith("set")) {
                     throw new JSONException("illegal setter");
                 }
@@ -392,6 +420,10 @@ public class JSONObject extends JSON implements Map<String, Object>, JSONAware, 
                         throw new JSONException("illegal getter");
                     }
                     name = Character.toLowerCase(name.charAt(0)) + name.substring(1);
+                } else if (name.startsWith("hashCode")) {
+                    return this.hashCode();
+                } else if (name.startsWith("toString")) {
+                    return this.toString();
                 } else {
                     throw new JSONException("illegal getter");
                 }

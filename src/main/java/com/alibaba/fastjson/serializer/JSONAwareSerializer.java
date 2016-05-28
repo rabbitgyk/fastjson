@@ -21,14 +21,14 @@ import java.lang.reflect.Type;
 import com.alibaba.fastjson.JSONAware;
 
 /**
- * @author wenshao<szujobs@hotmail.com>
+ * @author wenshao[szujobs@hotmail.com]
  */
 public class JSONAwareSerializer implements ObjectSerializer {
 
     public static JSONAwareSerializer instance = new JSONAwareSerializer();
 
-    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType) throws IOException {
-        SerializeWriter out = serializer.getWriter();
+    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType, int features) throws IOException {
+        SerializeWriter out = serializer.out;
 
         JSONAware aware = (JSONAware) object;
         out.write(aware.toJSONString());

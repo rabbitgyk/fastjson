@@ -26,11 +26,11 @@ import static com.alibaba.fastjson.parser.JSONToken.LITERAL_INT;
 import static com.alibaba.fastjson.parser.JSONToken.LITERAL_STRING;
 import static com.alibaba.fastjson.parser.JSONToken.NEW;
 import static com.alibaba.fastjson.parser.JSONToken.NULL;
-import static com.alibaba.fastjson.parser.JSONToken.UNDEFINED;
 import static com.alibaba.fastjson.parser.JSONToken.RBRACKET;
 import static com.alibaba.fastjson.parser.JSONToken.SET;
 import static com.alibaba.fastjson.parser.JSONToken.TREE_SET;
 import static com.alibaba.fastjson.parser.JSONToken.TRUE;
+import static com.alibaba.fastjson.parser.JSONToken.UNDEFINED;
 
 import java.io.Closeable;
 import java.lang.reflect.ParameterizedType;
@@ -43,6 +43,7 @@ import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -55,27 +56,27 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONException;
 import com.alibaba.fastjson.JSONObject;
-import com.alibaba.fastjson.parser.deserializer.ASMJavaBeanDeserializer;
-import com.alibaba.fastjson.parser.deserializer.CollectionResolveFieldDeserializer;
+import com.alibaba.fastjson.parser.deserializer.ExtraProcessable;
 import com.alibaba.fastjson.parser.deserializer.ExtraProcessor;
 import com.alibaba.fastjson.parser.deserializer.ExtraTypeProvider;
 import com.alibaba.fastjson.parser.deserializer.FieldDeserializer;
+import com.alibaba.fastjson.parser.deserializer.FieldTypeResolver;
 import com.alibaba.fastjson.parser.deserializer.JavaBeanDeserializer;
-import com.alibaba.fastjson.parser.deserializer.ListResolveFieldDeserializer;
-import com.alibaba.fastjson.parser.deserializer.MapResolveFieldDeserializer;
 import com.alibaba.fastjson.parser.deserializer.ObjectDeserializer;
+import com.alibaba.fastjson.parser.deserializer.ResolveFieldDeserializer;
+import com.alibaba.fastjson.serializer.BeanContext;
 import com.alibaba.fastjson.serializer.IntegerCodec;
 import com.alibaba.fastjson.serializer.LongCodec;
 import com.alibaba.fastjson.serializer.StringCodec;
 import com.alibaba.fastjson.util.TypeUtils;
 
 /**
- * @author wenshao<szujobs@hotmail.com>
+ * @author wenshao[szujobs@hotmail.com]
  */
-public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
+public class DefaultJSONParser implements Closeable {
 
-    protected final Object             input;
-    protected final SymbolTable        symbolTable;
+    public final Object                input;
+    public final SymbolTable           symbolTable;
     protected ParserConfig             config;
 
     private final static Set<Class<?>> primitiveClasses   = new HashSet<Class<?>>();
@@ -83,11 +84,11 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     private String                     dateFormatPattern  = JSON.DEFFAULT_DATE_FORMAT;
     private DateFormat                 dateFormat;
 
-    protected final JSONLexer          lexer;
+    public final JSONLexer             lexer;
 
     protected ParseContext             context;
 
-    private ParseContext[]             contextArray       = new ParseContext[8];
+    private ParseContext[]             contextArray;
     private int                        contextArrayIndex  = 0;
 
     private List<ResolveTask>          resolveTaskList;
@@ -96,10 +97,13 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     public final static int            NeedToResolve      = 1;
     public final static int            TypeNameRedirect   = 2;
 
-    private int                        resolveStatus      = NONE;
+    public int                         resolveStatus      = NONE;
 
     private List<ExtraTypeProvider>    extraTypeProviders = null;
     private List<ExtraProcessor>       extraProcessors    = null;
+    protected FieldTypeResolver        fieldTypeResolver  = null;
+    
+    protected transient BeanContext    lastBeanContext;
 
     static {
         primitiveClasses.add(boolean.class);
@@ -129,7 +133,8 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
     public DateFormat getDateFormat() {
         if (dateFormat == null) {
-            dateFormat = new SimpleDateFormat(dateFormatPattern);
+            dateFormat = new SimpleDateFormat(dateFormatPattern, lexer.getLocale());
+            dateFormat.setTimeZone(lexer.getTimeZone());
         }
         return dateFormat;
     }
@@ -171,9 +176,18 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
         this.lexer = lexer;
         this.input = input;
         this.config = config;
-        this.symbolTable = config.getSymbolTable();
+        this.symbolTable = config.symbolTable;
 
-        lexer.nextToken(JSONToken.LBRACE); // prime the pump
+        int ch = lexer.getCurrent();
+        if (ch == '{') {
+            lexer.next();
+            ((JSONLexerBase) lexer).token = JSONToken.LBRACE;
+        } else if (ch == '[') {
+            lexer.next();
+            ((JSONLexerBase) lexer).token = JSONToken.LBRACKET;
+        } else {
+            lexer.nextToken(); // prime the pump
+        }
     }
 
     public SymbolTable getSymbolTable() {
@@ -190,18 +204,28 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public final Object parseObject(final Map object, Object fieldName) {
         final JSONLexer lexer = this.lexer;
-
-        if (lexer.token() != JSONToken.LBRACE && lexer.token() != JSONToken.COMMA) {
-            throw new JSONException("syntax error, expect {, actual " + lexer.tokenName());
+        
+        if (lexer.token() == JSONToken.NULL) {
+            lexer.nextToken();
+            return null;
+        }
+        
+        if (lexer.token() == JSONToken.RBRACE) {
+            lexer.nextToken();
+            return object;
         }
 
-        ParseContext context = this.getContext();
+        if (lexer.token() != JSONToken.LBRACE && lexer.token() != JSONToken.COMMA) {
+            throw new JSONException("syntax error, expect {, actual " + lexer.tokenName() + ", " + lexer.info());
+        }
+
+       ParseContext context = this.context;
         try {
             boolean setContextFlag = false;
             for (;;) {
                 lexer.skipWhitespace();
                 char ch = lexer.getCurrent();
-                if (isEnabled(Feature.AllowArbitraryCommas)) {
+                if (lexer.isEnabled(Feature.AllowArbitraryCommas)) {
                     while (ch == ',') {
                         lexer.next();
                         lexer.skipWhitespace();
@@ -224,7 +248,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                     lexer.nextToken();
                     return object;
                 } else if (ch == '\'') {
-                    if (!isEnabled(Feature.AllowSingleQuotes)) {
+                    if (!lexer.isEnabled(Feature.AllowSingleQuotes)) {
                         throw new JSONException("syntax error");
                     }
 
@@ -241,21 +265,25 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                 } else if ((ch >= '0' && ch <= '9') || ch == '-') {
                     lexer.resetStringPosition();
                     lexer.scanNumber();
+                    try {
                     if (lexer.token() == JSONToken.LITERAL_INT) {
                         key = lexer.integerValue();
                     } else {
                         key = lexer.decimalValue(true);
                     }
+                    } catch (NumberFormatException e) {
+                        throw new JSONException("parse number key error" + lexer.info());
+                    }
                     ch = lexer.getCurrent();
                     if (ch != ':') {
-                        throw new JSONException("expect ':' at " + lexer.pos() + ", name " + key);
+                        throw new JSONException("parse number key error" + lexer.info());
                     }
                 } else if (ch == '{' || ch == '[') {
                     lexer.nextToken();
                     key = parse();
                     isObjectKey = true;
                 } else {
-                    if (!isEnabled(Feature.AllowUnQuotedFieldNames)) {
+                    if (!lexer.isEnabled(Feature.AllowUnQuotedFieldNames)) {
                         throw new JSONException("syntax error");
                     }
 
@@ -276,9 +304,9 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
                 lexer.resetStringPosition();
 
-                if (key == JSON.DEFAULT_TYPE_KEY) {
+                if (key == JSON.DEFAULT_TYPE_KEY && !lexer.isEnabled(Feature.DisableSpecialKeyDetect)) {
                     String typeName = lexer.scanSymbol(symbolTable, '"');
-                    Class<?> clazz = TypeUtils.loadClass(typeName);
+                    Class<?> clazz = TypeUtils.loadClass(typeName, config.getDefaultClassLoader());
 
                     if (clazz == null) {
                         object.put(JSON.DEFAULT_TYPE_KEY, typeName);
@@ -291,15 +319,15 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                         try {
                             Object instance = null;
                             ObjectDeserializer deserializer = this.config.getDeserializer(clazz);
-                            if (deserializer instanceof ASMJavaBeanDeserializer) {
-                                instance = ((ASMJavaBeanDeserializer) deserializer).createInstance(this, clazz);
-                            } else if (deserializer instanceof JavaBeanDeserializer) {
+                            if (deserializer instanceof JavaBeanDeserializer) {
                                 instance = ((JavaBeanDeserializer) deserializer).createInstance(this, clazz);
                             }
 
                             if (instance == null) {
                                 if (clazz == Cloneable.class) {
                                     instance = new HashMap();
+                                } else if ("java.util.Collections$EmptyMap".equals(typeName)) {
+                                    instance = Collections.emptyMap();
                                 } else {
                                     instance = clazz.newInstance();
                                 }
@@ -310,18 +338,24 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                             throw new JSONException("create instance error", e);
                         }
                     }
-
+                    
                     this.setResolveStatus(TypeNameRedirect);
 
                     if (this.context != null && !(fieldName instanceof Integer)) {
                         this.popContext();
+                    }
+                    
+                    if (object.size() > 0) {
+                        Object newObj = TypeUtils.cast(object, clazz, this.config);
+                        this.parseObject(newObj);
+                        return newObj;
                     }
 
                     ObjectDeserializer deserializer = config.getDeserializer(clazz);
                     return deserializer.deserialze(this, clazz, fieldName);
                 }
 
-                if (key == "$ref") {
+                if (key == "$ref" && !lexer.isEnabled(Feature.DisableSpecialKeyDetect)) {
                     lexer.nextToken(JSONToken.LITERAL_STRING);
                     if (lexer.token() == JSONToken.LITERAL_STRING) {
                         String ref = lexer.stringVal();
@@ -329,25 +363,30 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
                         Object refValue = null;
                         if ("@".equals(ref)) {
-                            if (this.getContext() != null) {
-                                refValue = this.getContext().getObject();
+                            if (this.context != null) {
+                                ParseContext thisContext = this.context;
+                                Object thisObj = thisContext.object;
+                                if (thisObj instanceof Object[] || thisObj instanceof Collection<?>) {
+                                    refValue = thisObj;
+                                } else if (thisContext.parent != null) {
+                                    refValue = thisContext.parent.object;
+                                }
                             }
                         } else if ("..".equals(ref)) {
-                            ParseContext parentContext = context.getParentContext();
-                            if (parentContext.getObject() != null) {
-                                refValue = parentContext.getObject();
+                            if (context.object != null) {
+                                refValue = context.object;
                             } else {
-                                addResolveTask(new ResolveTask(parentContext, ref));
+                                addResolveTask(new ResolveTask(context, ref));
                                 setResolveStatus(DefaultJSONParser.NeedToResolve);
                             }
                         } else if ("$".equals(ref)) {
                             ParseContext rootContext = context;
-                            while (rootContext.getParentContext() != null) {
-                                rootContext = rootContext.getParentContext();
+                            while (rootContext.parent != null) {
+                                rootContext = rootContext.parent;
                             }
 
-                            if (rootContext.getObject() != null) {
-                                refValue = rootContext.getObject();
+                            if (rootContext.object != null) {
+                                refValue = rootContext.object;
                             } else {
                                 addResolveTask(new ResolveTask(rootContext, ref));
                                 setResolveStatus(DefaultJSONParser.NeedToResolve);
@@ -369,17 +408,15 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                 }
 
                 if (!setContextFlag) {
-                    setContext(object, fieldName);
-                    setContextFlag = true;
-
-                    // fix Issue #40
-                    if (this.context != null && !(fieldName instanceof Integer)) {
-                        this.popContext();
+                    ParseContext contextR = setContext(object, fieldName);
+                    if (context == null) {
+                        context = contextR;
                     }
+                    setContextFlag = true;
                 }
-                
+
                 if (object.getClass() == JSONObject.class) {
-                    key = (key == null) ? "null" : key.toString(); 
+                    key = (key == null) ? "null" : key.toString();
                 }
 
                 Object value;
@@ -402,7 +439,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                     if (lexer.token() == JSONToken.LITERAL_INT) {
                         value = lexer.integerValue();
                     } else {
-                        value = lexer.numberValue();
+                        value = lexer.decimalValue(lexer.isEnabled(Feature.UseBigDecimal));
                     }
 
                     object.put(key, value);
@@ -410,7 +447,12 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                     lexer.nextToken();
                     JSONArray list = new JSONArray();
                     this.parseArray(list, key);
-                    value = list;
+                    
+                    if (lexer.isEnabled(Feature.UseObjectArray)) {
+                        value = list.toArray();
+                    } else {
+                        value = list;
+                    }
                     object.put(key, value);
 
                     if (lexer.token() == JSONToken.RBRACE) {
@@ -423,7 +465,35 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                     }
                 } else if (ch == '{') { // 减少嵌套，兼容android
                     lexer.nextToken();
-                    Object obj = this.parseObject(new JSONObject(), key);
+
+                    final boolean parentIsArray = fieldName != null && fieldName.getClass() == Integer.class;
+
+                    JSONObject input = new JSONObject(lexer.isEnabled(Feature.OrderedField));
+                    ParseContext ctxLocal = null;
+
+                    if (!parentIsArray) {
+                        ctxLocal = setContext(context, input, key);
+                    }
+
+                    Object obj = null;
+                    boolean objParsed = false;
+                    if (fieldTypeResolver != null) {
+                        String resolveFieldName = key != null ? key.toString() : null;
+                        Type fieldType = fieldTypeResolver.resolve(object, resolveFieldName);
+                        if (fieldType != null) {
+                            ObjectDeserializer fieldDeser = config.getDeserializer(fieldType);
+                            obj = fieldDeser.deserialze(this, fieldType, key);
+                            objParsed = true;
+                        }
+                    }
+                    if (!objParsed) {
+                        obj = this.parseObject(input, key);
+                    }
+                    
+                    if (ctxLocal != null && input != obj) {
+                        ctxLocal.object = object;
+                    }
+
                     checkMapResolve(object, key.toString());
 
                     if (object.getClass() == JSONObject.class) {
@@ -432,7 +502,10 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                         object.put(key, obj);
                     }
 
-                    setContext(context, obj, key);
+                    if (parentIsArray) {
+                        //setContext(context, obj, key);
+                        setContext(obj, key);
+                    }
 
                     if (lexer.token() == JSONToken.RBRACE) {
                         lexer.nextToken();
@@ -440,6 +513,9 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                         setContext(context);
                         return object;
                     } else if (lexer.token() == JSONToken.COMMA) {
+                        if (parentIsArray) {
+                            this.popContext();
+                        }
                         continue;
                     } else {
                         throw new JSONException("syntax error, " + lexer.tokenName());
@@ -447,7 +523,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                 } else {
                     lexer.nextToken();
                     value = parse();
-                    
+
                     if (object.getClass() == JSONObject.class) {
                         key = key.toString();
                     }
@@ -473,7 +549,8 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                     lexer.resetStringPosition();
                     lexer.nextToken();
 
-                    this.setContext(object, fieldName);
+                    // this.setContext(object, fieldName);
+                    this.setContext(value, key);
 
                     return object;
                 } else {
@@ -498,20 +575,39 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     // compatible
     @SuppressWarnings("unchecked")
     public <T> T parseObject(Class<T> clazz) {
-        return (T) parseObject((Type) clazz);
+        return (T) parseObject(clazz, null);
+    }
+    
+    public <T> T parseObject(Type type) {
+        return parseObject(type, null);
     }
 
     @SuppressWarnings("unchecked")
-    public <T> T parseObject(Type type) {
-        if (lexer.token() == JSONToken.NULL) {
+    public <T> T parseObject(Type type, Object fieldName) {
+        int token = lexer.token();
+        if (token == JSONToken.NULL) {
             lexer.nextToken();
             return null;
+        }
+
+        if (token == JSONToken.LITERAL_STRING) {
+            if (type == byte[].class) {
+                byte[] bytes = lexer.bytesValue();
+                lexer.nextToken();
+                return (T) bytes;
+            }
+
+            if (type == char[].class) {
+                String strVal = lexer.stringVal();
+                lexer.nextToken();
+                return (T) strVal.toCharArray();
+            }
         }
 
         ObjectDeserializer derializer = config.getDeserializer(type);
 
         try {
-            return (T) derializer.deserialze(this, type, null);
+            return (T) derializer.deserialze(this, type, fieldName);
         } catch (JSONException e) {
             throw e;
         } catch (Throwable e) {
@@ -541,7 +637,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
         }
 
         if (lexer.token() != JSONToken.LBRACKET) {
-            throw new JSONException("exepct '[', but " + JSONToken.name(lexer.token()));
+            throw new JSONException("exepct '[', but " + JSONToken.name(lexer.token()) + ", " + lexer.info());
         }
 
         ObjectDeserializer deserializer = null;
@@ -556,11 +652,11 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
             lexer.nextToken(deserializer.getFastMatchToken());
         }
 
-        ParseContext context = this.getContext();
+        ParseContext context = this.context;
         this.setContext(array, fieldName);
         try {
             for (int i = 0;; ++i) {
-                if (isEnabled(Feature.AllowArbitraryCommas)) {
+                if (lexer.isEnabled(Feature.AllowArbitraryCommas)) {
                     while (lexer.token() == JSONToken.COMMA) {
                         lexer.nextToken();
                         continue;
@@ -729,7 +825,11 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
     public void parseObject(Object object) {
         Class<?> clazz = object.getClass();
-        Map<String, FieldDeserializer> setters = config.getFieldDeserializers(clazz);
+        JavaBeanDeserializer beanDeser = null;
+        ObjectDeserializer deserizer = config.getDeserializer(clazz);
+        if (deserizer instanceof JavaBeanDeserializer) {
+            beanDeser = (JavaBeanDeserializer) deserizer;
+        }
 
         if (lexer.token() != JSONToken.LBRACE && lexer.token() != JSONToken.COMMA) {
             throw new JSONException("syntax error, expect {, actual " + lexer.tokenName());
@@ -745,15 +845,19 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                     break;
                 }
                 if (lexer.token() == JSONToken.COMMA) {
-                    if (isEnabled(Feature.AllowArbitraryCommas)) {
+                    if (lexer.isEnabled(Feature.AllowArbitraryCommas)) {
                         continue;
                     }
                 }
             }
 
-            FieldDeserializer fieldDeser = setters.get(key);
+            FieldDeserializer fieldDeser = null;
+            if (beanDeser != null) {
+                fieldDeser = beanDeser.getFieldDeserializer(key);
+            }
+            
             if (fieldDeser == null) {
-                if (!isEnabled(Feature.IgnoreNotMatch)) {
+                if (!lexer.isEnabled(Feature.IgnoreNotMatch)) {
                     throw new JSONException("setter not found, class " + clazz.getName() + ", property " + key);
                 }
 
@@ -767,8 +871,8 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
                 continue;
             } else {
-                Class<?> fieldClass = fieldDeser.getFieldClass();
-                Type fieldType = fieldDeser.getFieldType();
+                Class<?> fieldClass = fieldDeser.fieldInfo.fieldClass;
+                Type fieldType = fieldDeser.fieldInfo.fieldType;
                 Object fieldValue;
                 if (fieldClass == int.class) {
                     lexer.nextTokenWithColon(JSONToken.LITERAL_INT);
@@ -900,8 +1004,8 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
     public Object getObject(String path) {
         for (int i = 0; i < contextArrayIndex; ++i) {
-            if (path.equals(contextArray[i].getPath())) {
-                return contextArray[i].getObject();
+            if (path.equals(contextArray[i].toString())) {
+                return contextArray[i].object;
             }
         }
 
@@ -915,25 +1019,25 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                 final int index = array.size() - 1;
                 final List list = (List) array;
                 ResolveTask task = getLastResolveTask();
-                task.setFieldDeserializer(new ListResolveFieldDeserializer(this, list, index));
-                task.setOwnerContext(context);
+                task.fieldDeserializer = new ResolveFieldDeserializer(this, list, index);
+                task.ownerContext = context;
                 setResolveStatus(DefaultJSONParser.NONE);
             } else {
                 ResolveTask task = getLastResolveTask();
-                task.setFieldDeserializer(new CollectionResolveFieldDeserializer(this, array));
-                task.setOwnerContext(context);
+                task.fieldDeserializer  = new ResolveFieldDeserializer(array);
+                task.ownerContext = context;
                 setResolveStatus(DefaultJSONParser.NONE);
             }
         }
     }
 
     @SuppressWarnings("rawtypes")
-    public void checkMapResolve(Map object, String fieldName) {
+    public void checkMapResolve(Map object, Object fieldName) {
         if (resolveStatus == NeedToResolve) {
-            MapResolveFieldDeserializer fieldResolver = new MapResolveFieldDeserializer(object, fieldName);
+            ResolveFieldDeserializer fieldResolver = new ResolveFieldDeserializer(object, fieldName);
             ResolveTask task = getLastResolveTask();
-            task.setFieldDeserializer(fieldResolver);
-            task.setOwnerContext(context);
+            task.fieldDeserializer = fieldResolver;
+            task.ownerContext = context;
             setResolveStatus(DefaultJSONParser.NONE);
         }
     }
@@ -944,8 +1048,8 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     }
 
     public JSONObject parseObject() {
-        JSONObject object = new JSONObject();
-        parseObject(object);
+        JSONObject object = new JSONObject(lexer.isEnabled(Feature.OrderedField));
+        object = (JSONObject) parseObject(object);
         return object;
     }
 
@@ -956,7 +1060,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
     public final void parseArray(final Collection array, Object fieldName) {
-        final JSONLexer lexer = getLexer();
+        final JSONLexer lexer = this.lexer;
 
         if (lexer.token() == JSONToken.SET || lexer.token() == JSONToken.TREE_SET) {
             lexer.nextToken();
@@ -969,11 +1073,11 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
         lexer.nextToken(JSONToken.LITERAL_STRING);
 
-        ParseContext context = this.getContext();
+        ParseContext context = this.context;
         this.setContext(array, fieldName);
         try {
             for (int i = 0;; ++i) {
-                if (isEnabled(Feature.AllowArbitraryCommas)) {
+                if (lexer.isEnabled(Feature.AllowArbitraryCommas)) {
                     while (lexer.token() == JSONToken.COMMA) {
                         lexer.nextToken();
                         continue;
@@ -1020,13 +1124,17 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                         lexer.nextToken(JSONToken.COMMA);
                         break;
                     case LBRACE:
-                        JSONObject object = new JSONObject();
+                        JSONObject object = new JSONObject(lexer.isEnabled(Feature.OrderedField));
                         value = parseObject(object, i);
                         break;
                     case LBRACKET:
                         Collection items = new JSONArray();
                         parseArray(items, i);
-                        value = items;
+                        if (lexer.isEnabled(Feature.UseObjectArray)) {
+                            value = items.toArray();
+                        } else {
+                            value = items;
+                        }
                         break;
                     case NULL:
                         value = null;
@@ -1070,10 +1178,6 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
         return resolveTaskList;
     }
 
-    public List<ResolveTask> getResolveTaskListDirect() {
-        return resolveTaskList;
-    }
-
     public void addResolveTask(ResolveTask task) {
         if (resolveTaskList == null) {
             resolveTaskList = new ArrayList<ResolveTask>(2);
@@ -1092,40 +1196,40 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
         return extraProcessors;
     }
 
-    public List<ExtraProcessor> getExtraProcessorsDirect() {
-        return extraProcessors;
-    }
-
     public List<ExtraTypeProvider> getExtraTypeProviders() {
         if (extraTypeProviders == null) {
             extraTypeProviders = new ArrayList<ExtraTypeProvider>(2);
         }
         return extraTypeProviders;
     }
+
+    public FieldTypeResolver getFieldTypeResolver() {
+        return fieldTypeResolver;
+    }
     
-    public List<ExtraTypeProvider> getExtraTypeProvidersDirect() {
-        return extraTypeProviders;
+    public void setFieldTypeResolver(FieldTypeResolver fieldTypeResolver) {
+        this.fieldTypeResolver = fieldTypeResolver;
     }
 
     public void setContext(ParseContext context) {
-        if (isEnabled(Feature.DisableCircularReferenceDetect)) {
+        if (lexer.isEnabled(Feature.DisableCircularReferenceDetect)) {
             return;
         }
         this.context = context;
     }
 
     public void popContext() {
-        if (isEnabled(Feature.DisableCircularReferenceDetect)) {
+        if (lexer.isEnabled(Feature.DisableCircularReferenceDetect)) {
             return;
         }
 
-        this.context = this.context.getParentContext();
+        this.context = this.context.parent;
         contextArray[contextArrayIndex - 1] = null;
         contextArrayIndex--;
     }
 
     public ParseContext setContext(Object object, Object fieldName) {
-        if (isEnabled(Feature.DisableCircularReferenceDetect)) {
+        if (lexer.isEnabled(Feature.DisableCircularReferenceDetect)) {
             return null;
         }
 
@@ -1133,7 +1237,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     }
 
     public ParseContext setContext(ParseContext parent, Object object, Object fieldName) {
-        if (isEnabled(Feature.DisableCircularReferenceDetect)) {
+        if (lexer.isEnabled(Feature.DisableCircularReferenceDetect)) {
             return null;
         }
 
@@ -1145,7 +1249,9 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
 
     private void addContext(ParseContext context) {
         int i = contextArrayIndex++;
-        if (i >= contextArray.length) {
+        if (contextArray == null) {
+            contextArray = new ParseContext[8];
+        } else if (i >= contextArray.length) {
             int newLen = (contextArray.length * 3) / 2;
             ParseContext[] newArray = new ParseContext[newLen];
             System.arraycopy(contextArray, 0, newArray, 0, contextArray.length);
@@ -1168,7 +1274,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     }
 
     public Object parse(Object fieldName) {
-        final JSONLexer lexer = getLexer();
+        final JSONLexer lexer = this.lexer;
         switch (lexer.token()) {
             case SET:
                 lexer.nextToken();
@@ -1183,16 +1289,19 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
             case LBRACKET:
                 JSONArray array = new JSONArray();
                 parseArray(array, fieldName);
+                if (lexer.isEnabled(Feature.UseObjectArray)) {
+                    return array.toArray();
+                }
                 return array;
             case LBRACE:
-                JSONObject object = new JSONObject();
+                JSONObject object = new JSONObject(lexer.isEnabled(Feature.OrderedField));
                 return parseObject(object, fieldName);
             case LITERAL_INT:
                 Number intValue = lexer.integerValue();
                 lexer.nextToken();
                 return intValue;
             case LITERAL_FLOAT:
-                Object value = lexer.decimalValue(isEnabled(Feature.UseBigDecimal));
+                Object value = lexer.decimalValue(lexer.isEnabled(Feature.UseBigDecimal));
                 lexer.nextToken();
                 return value;
             case LITERAL_STRING:
@@ -1242,19 +1351,19 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
                 if (lexer.isBlankInput()) {
                     return null;
                 }
-                throw new JSONException("unterminated json string, pos " + lexer.getBufferPosition());
+                throw new JSONException("unterminated json string, " + lexer.info());
             case ERROR:
             default:
-                throw new JSONException("syntax error, pos " + lexer.getBufferPosition());
+                throw new JSONException("syntax error, " + lexer.info());
         }
     }
 
     public void config(Feature feature, boolean state) {
-        getLexer().config(feature, state);
+        this.lexer.config(feature, state);
     }
 
     public boolean isEnabled(Feature feature) {
-        return getLexer().isEnabled(feature);
+        return lexer.isEnabled(feature);
     }
 
     public JSONLexer getLexer() {
@@ -1262,7 +1371,7 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     }
 
     public final void accept(final int token) {
-        final JSONLexer lexer = getLexer();
+        final JSONLexer lexer = this.lexer;
         if (lexer.token() == token) {
             lexer.nextToken();
         } else {
@@ -1272,20 +1381,24 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
     }
 
     public final void accept(final int token, int nextExpectToken) {
-        final JSONLexer lexer = getLexer();
+        final JSONLexer lexer = this.lexer;
         if (lexer.token() == token) {
             lexer.nextToken(nextExpectToken);
         } else {
-            throw new JSONException("syntax error, expect " + JSONToken.name(token) + ", actual "
-                                    + JSONToken.name(lexer.token()));
+            throwException(token);
         }
     }
-
+    
+    public void throwException(int token) {
+        throw new JSONException("syntax error, expect " + JSONToken.name(token) + ", actual "
+                                + JSONToken.name(lexer.token()));
+    }
+    
     public void close() {
-        final JSONLexer lexer = getLexer();
+        final JSONLexer lexer = this.lexer;
 
         try {
-            if (isEnabled(Feature.AutoCloseSource)) {
+            if (lexer.isEnabled(Feature.AutoCloseSource)) {
                 if (lexer.token() != JSONToken.EOF) {
                     throw new JSONException("not close json text, token : " + JSONToken.name(lexer.token()));
                 }
@@ -1295,42 +1408,73 @@ public class DefaultJSONParser extends AbstractJSONParser implements Closeable {
         }
     }
 
+    public void handleResovleTask(Object value) {
+        if (resolveTaskList == null) {
+            return;
+        }
+
+        int size = resolveTaskList.size();
+        for (int i = 0; i < size; ++i) {
+            ResolveTask task = resolveTaskList.get(i);
+            String ref = task.referenceValue;
+
+            Object object = null;
+            if (task.ownerContext != null) {
+                object = task.ownerContext.object;
+            }
+
+            Object refValue;
+            if (ref.startsWith("$")) {
+                refValue = getObject(ref);
+            } else {
+                refValue = task.context.object;
+            }
+            
+            FieldDeserializer fieldDeser = task.fieldDeserializer;
+
+            if (fieldDeser != null) {
+                fieldDeser.setValue(object, refValue);
+            }
+        }
+    }
+
     public static class ResolveTask {
 
-        private final ParseContext context;
-        private final String       referenceValue;
-        private FieldDeserializer  fieldDeserializer;
-        private ParseContext       ownerContext;
+        public final ParseContext context;
+        public final String       referenceValue;
+        public FieldDeserializer  fieldDeserializer;
+        public ParseContext       ownerContext;
 
         public ResolveTask(ParseContext context, String referenceValue){
             this.context = context;
             this.referenceValue = referenceValue;
         }
-
-        public ParseContext getContext() {
-            return context;
-        }
-
-        public String getReferenceValue() {
-            return referenceValue;
-        }
-
-        public FieldDeserializer getFieldDeserializer() {
-            return fieldDeserializer;
-        }
-
-        public void setFieldDeserializer(FieldDeserializer fieldDeserializer) {
-            this.fieldDeserializer = fieldDeserializer;
-        }
-
-        public ParseContext getOwnerContext() {
-            return ownerContext;
-        }
-
-        public void setOwnerContext(ParseContext ownerContext) {
-            this.ownerContext = ownerContext;
-        }
-
     }
+    
+    public void parseExtra(Object object, String key) {
+        final JSONLexer lexer = this.lexer; // xxx
+        lexer.nextTokenWithColon();
+        Type type = null;
+        
+        if (extraTypeProviders != null) {
+            for (ExtraTypeProvider extraProvider : extraTypeProviders) {
+                type = extraProvider.getExtraType(object, key);
+            }
+        }
+        Object value = type == null //
+            ? parse() // skip
+            : parseObject(type);
+            
+        if (object instanceof ExtraProcessable) {
+            ExtraProcessable extraProcessable = ((ExtraProcessable) object);
+            extraProcessable.processExtra(key, value);
+            return;
+        }
 
+        if (extraProcessors != null) {
+            for (ExtraProcessor process : extraProcessors) {
+                process.processExtra(object, key, value);
+            }
+        }
+    }
 }

@@ -18,18 +18,15 @@ package com.alibaba.fastjson.util;
 /**
  * for concurrent IdentityHashMap
  * 
- * @author wenshao<szujobs@hotmail.com>
+ * @author wenshao[szujobs@hotmail.com]
  */
 @SuppressWarnings("unchecked")
 public class IdentityHashMap<K, V> {
-
-    public static final int     DEFAULT_TABLE_SIZE = 1024;
-
     private final Entry<K, V>[] buckets;
     private final int           indexMask;
 
     public IdentityHashMap(){
-        this(DEFAULT_TABLE_SIZE);
+        this(1024);
     }
 
     public IdentityHashMap(int tableSize){
@@ -65,16 +62,6 @@ public class IdentityHashMap<K, V> {
         buckets[bucket] = entry;  // 并发是处理时会可能导致缓存丢失，但不影响正确性
 
         return false;
-    }
-
-    public int size() {
-        int size = 0;
-        for (int i = 0; i < buckets.length; ++i) {
-            for (Entry<K, V> entry = buckets[i]; entry != null; entry = entry.next) {
-                size++;
-            }
-        }
-        return size;
     }
 
     protected static final class Entry<K, V> {

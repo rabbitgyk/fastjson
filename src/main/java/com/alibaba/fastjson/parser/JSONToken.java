@@ -16,7 +16,7 @@
 package com.alibaba.fastjson.parser;
 
 /**
- * @author wenshao<szujobs@hotmail.com>
+ * @author wenshao[szujobs@hotmail.com]
  */
 public class JSONToken {
 
@@ -115,7 +115,7 @@ public class JSONToken {
             case UNDEFINED:
                 return "undefined";
             default:
-                return "Unkown";
+                return "Unknown";
         }
     }
 }

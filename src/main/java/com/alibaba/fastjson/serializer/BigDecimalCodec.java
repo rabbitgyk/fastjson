@@ -26,29 +26,24 @@ import com.alibaba.fastjson.parser.deserializer.ObjectDeserializer;
 import com.alibaba.fastjson.util.TypeUtils;
 
 /**
- * @author wenshao<szujobs@hotmail.com>
+ * @author wenshao[szujobs@hotmail.com]
  */
 public class BigDecimalCodec implements ObjectSerializer, ObjectDeserializer {
 
     public final static BigDecimalCodec instance = new BigDecimalCodec();
 
-    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType) throws IOException {
-        SerializeWriter out = serializer.getWriter();
+    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType, int features) throws IOException {
+        SerializeWriter out = serializer.out;
 
         if (object == null) {
-            if (out.isEnabled(SerializerFeature.WriteNullNumberAsZero)) {
-                out.write('0');
-            } else {
-                out.writeNull();
+            out.writeNull(SerializerFeature.WriteNullNumberAsZero);
+        } else {
+            BigDecimal val = (BigDecimal) object;
+            out.write(val.toString());
+
+            if (out.isEnabled(SerializerFeature.WriteClassName) && fieldType != BigDecimal.class && val.scale() == 0) {
+                out.write('.');
             }
-            return;
-        }
-
-        BigDecimal val = (BigDecimal) object;
-        out.write(val.toString());
-
-        if (out.isEnabled(SerializerFeature.WriteClassName) && fieldType != BigDecimal.class && val.scale() == 0) {
-            out.write('.');
         }
     }
 
@@ -59,11 +54,11 @@ public class BigDecimalCodec implements ObjectSerializer, ObjectDeserializer {
 
     @SuppressWarnings("unchecked")
     public static <T> T deserialze(DefaultJSONParser parser) {
-        final JSONLexer lexer = parser.getLexer();
+        final JSONLexer lexer = parser.lexer;
         if (lexer.token() == JSONToken.LITERAL_INT) {
-            long val = lexer.longValue();
+            BigDecimal decimalValue = lexer.decimalValue();
             lexer.nextToken(JSONToken.COMMA);
-            return (T) new BigDecimal(val);
+            return (T) decimalValue;
         }
 
         if (lexer.token() == JSONToken.LITERAL_FLOAT) {
@@ -73,12 +68,9 @@ public class BigDecimalCodec implements ObjectSerializer, ObjectDeserializer {
         }
 
         Object value = parser.parse();
-
-        if (value == null) {
-            return null;
-        }
-
-        return (T) TypeUtils.castToBigDecimal(value);
+        return value == null //
+            ? null //
+            : (T) TypeUtils.castToBigDecimal(value);
     }
 
     public int getFastMatchToken() {

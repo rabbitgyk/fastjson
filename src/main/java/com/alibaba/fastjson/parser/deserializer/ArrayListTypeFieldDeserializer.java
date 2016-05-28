@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Map;
 
-import com.alibaba.fastjson.JSONException;
 import com.alibaba.fastjson.parser.DefaultJSONParser;
 import com.alibaba.fastjson.parser.Feature;
 import com.alibaba.fastjson.parser.JSONLexer;
@@ -25,9 +24,9 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
     public ArrayListTypeFieldDeserializer(ParserConfig mapping, Class<?> clazz, FieldInfo fieldInfo){
         super(clazz, fieldInfo);
 
-        Type fieldType = getFieldType();
+        Type fieldType = fieldInfo.fieldType;
         if (fieldType instanceof ParameterizedType) {
-            this.itemType = ((ParameterizedType) getFieldType()).getActualTypeArguments()[0];
+            this.itemType = ((ParameterizedType) fieldInfo.fieldType).getActualTypeArguments()[0];
         } else {
             this.itemType = Object.class;
         }
@@ -40,7 +39,7 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
     @SuppressWarnings("rawtypes")
     @Override
     public void parseField(DefaultJSONParser parser, Object object, Type objectType, Map<String, Object> fieldValues) {
-        if (parser.getLexer().token() == JSONToken.NULL) {
+        if (parser.lexer.token() == JSONToken.NULL) {
             setValue(object, null);
             return;
         }
@@ -49,12 +48,12 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
 
         ParseContext context = parser.getContext();
 
-        parser.setContext(context, object, fieldInfo.getName());
+        parser.setContext(context, object, fieldInfo.name);
         parseArray(parser, objectType, list);
         parser.setContext(context);
 
         if (object == null) {
-            fieldValues.put(fieldInfo.getName(), list);
+            fieldValues.put(fieldInfo.name, list);
         } else {
             setValue(object, list);
         }
@@ -64,7 +63,7 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
     public final void parseArray(DefaultJSONParser parser, Type objectType, Collection array) {
         Type itemType = this.itemType;
         ObjectDeserializer itemTypeDeser = this.deserializer;
-        
+
         if (itemType instanceof TypeVariable //
             && objectType instanceof ParameterizedType) {
             TypeVariable typeVar = (TypeVariable) itemType;
@@ -94,47 +93,47 @@ public class ArrayListTypeFieldDeserializer extends FieldDeserializer {
             }
         }
 
-        final JSONLexer lexer = parser.getLexer();
+        final JSONLexer lexer = parser.lexer;
 
-        if (lexer.token() != JSONToken.LBRACKET) {
-            String errorMessage = "exepct '[', but " + JSONToken.name(lexer.token());
-            if (objectType != null) {
-                errorMessage += ", type : " + objectType;
+        if (lexer.token() == JSONToken.LBRACKET) {
+            if (itemTypeDeser == null) {
+                itemTypeDeser = deserializer = parser.getConfig().getDeserializer(itemType);
+                itemFastMatchToken = deserializer.getFastMatchToken();
             }
-            throw new JSONException(errorMessage);
-        }
 
-        if (itemTypeDeser == null) {
-            itemTypeDeser = deserializer = parser.getConfig().getDeserializer(itemType);
-            itemFastMatchToken = deserializer.getFastMatchToken();
-        }
+            lexer.nextToken(itemFastMatchToken);
 
-        lexer.nextToken(itemFastMatchToken);
+            for (int i = 0;; ++i) {
+                if (lexer.isEnabled(Feature.AllowArbitraryCommas)) {
+                    while (lexer.token() == JSONToken.COMMA) {
+                        lexer.nextToken();
+                        continue;
+                    }
+                }
 
-        for (int i = 0;; ++i) {
-            if (lexer.isEnabled(Feature.AllowArbitraryCommas)) {
-                while (lexer.token() == JSONToken.COMMA) {
-                    lexer.nextToken();
+                if (lexer.token() == JSONToken.RBRACKET) {
+                    break;
+                }
+
+                Object val = itemTypeDeser.deserialze(parser, itemType, i);
+                array.add(val);
+
+                parser.checkListResolve(array);
+
+                if (lexer.token() == JSONToken.COMMA) {
+                    lexer.nextToken(itemFastMatchToken);
                     continue;
                 }
             }
 
-            if (lexer.token() == JSONToken.RBRACKET) {
-                break;
+            lexer.nextToken(JSONToken.COMMA);
+        } else {
+            if (itemTypeDeser == null) {
+                itemTypeDeser = deserializer = parser.getConfig().getDeserializer(itemType);
             }
-
-            Object val = itemTypeDeser.deserialze(parser, itemType, i);
+            Object val = itemTypeDeser.deserialze(parser, itemType, 0);
             array.add(val);
-
             parser.checkListResolve(array);
-
-            if (lexer.token() == JSONToken.COMMA) {
-                lexer.nextToken(itemFastMatchToken);
-                continue;
-            }
         }
-
-        lexer.nextToken(JSONToken.COMMA);
     }
-
 }
